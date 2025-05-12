@@ -1,0 +1,536 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Tracking Drawing App</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+            overflow: hidden;
+        }
+        h1 {
+            margin-top: 20px;
+            color: #333;
+        }
+        .container {
+            position: relative;
+            margin-top: 20px;
+        }
+        #video {
+            transform: scaleX(-1);
+            width: 640px;
+            height: 480px;
+            border: 2px solid #333;
+            border-radius: 8px;
+        }
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            transform: scaleX(-1);
+            z-index: 10;
+            border-radius: 8px;
+        }
+        #debugCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            transform: scaleX(-1);
+            z-index: 20;
+            border-radius: 8px;
+            pointer-events: none;
+        }
+        #menuCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            transform: scaleX(-1);
+            z-index: 30;
+            border-radius: 8px;
+            pointer-events: none;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #333;
+            color: white;
+            border-radius: 4px;
+            text-align: center;
+            width: 640px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Hand Tracking Drawing App</h1>
+    <div class="container">
+        <video id="video" playsinline></video>
+        <canvas id="canvas"></canvas>
+        <canvas id="debugCanvas"></canvas>
+        <canvas id="menuCanvas"></canvas>
+    </div>
+    <div class="status" id="status">Loading TensorFlow.js models...</div>
+
+    <!-- TensorFlow.js and hand pose detection libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection@2.0.0/dist/hand-pose-detection.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.min.js"></script>
+
+    <script>
+        // DOM elements
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const debugCanvas = document.getElementById('debugCanvas');
+        const debugCtx = debugCanvas.getContext('2d');
+        const menuCanvas = document.getElementById('menuCanvas');
+        const menuCtx = menuCanvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+
+        // App state
+        let detector;
+        let isDrawing = false;
+        let lastX = 0;
+        let lastY = 0;
+        let drawColor = '#000000';
+        let lineWidth = 4; // Medium size as default
+        let showMenu = false;
+        let menuHoverItem = null;
+        let rightHandLandmarks = null;
+        let leftHandLandmarks = null;
+
+        // Menu configuration
+        const colorOptions = [
+            { name: 'Black', color: '#000000' },
+            { name: 'White', color: '#FFFFFF' },
+            { name: 'Red', color: '#FF0000' },
+            { name: 'Yellow', color: '#FFFF00' },
+            { name: 'Blue', color: '#0000FF' },
+            { name: 'Green', color: '#00FF00' },
+            { name: 'Purple', color: '#800080' },
+            { name: 'Cyan', color: '#00FFFF' },
+            { name: 'Orange', color: '#FFA500' }
+        ];
+
+        const sizeOptions = [
+            { name: 'Small', size: 2 },
+            { name: 'Medium', size: 4 },
+            { name: 'Large', size: 8 }
+        ];
+
+        // Menu button configuration
+        const menuItems = [];
+        
+        // Add color options
+        colorOptions.forEach((color, index) => {
+            menuItems.push({
+                x: 50 + (index % 3) * 80,
+                y: 50 + Math.floor(index / 3) * 50,
+                width: 60,
+                height: 40,
+                type: 'color',
+                name: color.name,
+                value: color.color,
+                action: () => { drawColor = color.color; }
+            });
+        });
+        
+        // Add size options
+        sizeOptions.forEach((size, index) => {
+            menuItems.push({
+                x: 50 + index * 80,
+                y: 200,
+                width: 60,
+                height: 40,
+                type: 'size',
+                name: size.name,
+                value: size.size,
+                action: () => { lineWidth = size.size; }
+            });
+        });
+        
+        // Add clear button
+        menuItems.push({
+            x: 290,
+            y: 200,
+            width: 80,
+            height: 40,
+            type: 'action',
+            name: 'Clear All',
+            action: () => { ctx.clearRect(0, 0, canvas.width, canvas.height); }
+        });
+
+        // Initialize the application
+        async function init() {
+            try {
+                // Set up video stream
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 640, height: 480 }
+                });
+                video.srcObject = stream;
+
+                // Wait for the video to be ready
+                await new Promise(resolve => {
+                    video.onloadedmetadata = () => {
+                        video.play();
+                        resolve();
+                    };
+                });
+
+                // Set up canvas dimensions
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                debugCanvas.width = video.videoWidth;
+                debugCanvas.height = video.videoHeight;
+                menuCanvas.width = video.videoWidth;
+                menuCanvas.height = video.videoHeight;
+
+                // Initialize hand detector
+                const detectorConfig = {
+                    runtime: 'mediapipe',
+                    modelType: 'full',
+                    maxHands: 2,
+                    solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands'
+                };
+                
+                statusDiv.textContent = "Loading hand pose model...";
+                detector = await handPoseDetection.createDetector(
+                    handPoseDetection.SupportedModels.MediaPipeHands, 
+                    detectorConfig
+                );
+                statusDiv.textContent = "Model loaded! Move your hands in view of the camera.";
+
+                // Start detection loop
+                requestAnimationFrame(detectHands);
+            } catch (error) {
+                console.error('Error initializing app:', error);
+                statusDiv.textContent = `Error: ${error.message}`;
+            }
+        }
+
+        // Detect hands and handle interactions
+        async function detectHands() {
+            try {
+                // Clear debug canvas
+                debugCtx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+                menuCtx.clearRect(0, 0, menuCanvas.width, menuCanvas.height);
+                
+                // Reset hand landmarks
+                rightHandLandmarks = null;
+                leftHandLandmarks = null;
+                
+                // Detect hands
+                const hands = await detector.estimateHands(video);
+                
+                if (hands && hands.length > 0) {
+                    statusDiv.textContent = `Detected ${hands.length} hand(s)`;
+                    
+                    // Separate left and right hands
+                    for (const hand of hands) {
+                        if (hand.handedness === 'Left') { // This is actually right hand in mirrored view
+                            rightHandLandmarks = hand.keypoints;
+                        } else if (hand.handedness === 'Right') { // This is actually left hand in mirrored view
+                            leftHandLandmarks = hand.keypoints;
+                        }
+                    }
+                    
+                    // Process right hand for drawing
+                    if (rightHandLandmarks) {
+                        drawHandLandmarks(rightHandLandmarks, 'right');
+                        
+                        // Check if thumb and index finger are close for drawing
+                        const thumb = rightHandLandmarks[4];  // Thumb tip
+                        const index = rightHandLandmarks[8];  // Index tip
+                        
+                        // Calculate distance between thumb and index
+                        const distance = calculateDistance(thumb, index);
+                        
+                        // Calculate midpoint between thumb and index
+                        const midpoint = {
+                            x: (thumb.x + index.x) / 2,
+                            y: (thumb.y + index.y) / 2
+                        };
+                        
+                        // Draw midpoint indicator
+                        debugCtx.beginPath();
+                        debugCtx.arc(midpoint.x, midpoint.y, 8, 0, 2 * Math.PI);
+                        debugCtx.fillStyle = 'yellow';
+                        debugCtx.fill();
+                        
+                        // If menu is showing, check for menu selection
+                        if (showMenu) {
+                            menuHoverItem = checkMenuHover(midpoint.x, midpoint.y);
+                            
+                            if (menuHoverItem && distance < 30) {
+                                // Execute action for selected menu item
+                                menuHoverItem.action();
+                                statusDiv.textContent = `Selected: ${menuHoverItem.name}`;
+                                showMenu = false; // Hide menu after selection
+                            }
+                        } else {
+                            // If distance is small enough, draw
+                            if (distance < 30) {
+                                if (!isDrawing) {
+                                    // Start drawing
+                                    isDrawing = true;
+                                    lastX = midpoint.x;
+                                    lastY = midpoint.y;
+                                } else {
+                                    // Continue drawing
+                                    drawLine(lastX, lastY, midpoint.x, midpoint.y);
+                                    lastX = midpoint.x;
+                                    lastY = midpoint.y;
+                                }
+                            } else {
+                                isDrawing = false;
+                            }
+                        }
+                    }
+                    
+                    // Process left hand for menu
+                    if (leftHandLandmarks) {
+                        drawHandLandmarks(leftHandLandmarks, 'left');
+                        
+                        // Check if left hand is open (not a fist)
+                        const isHandOpen = isLeftHandOpen(leftHandLandmarks);
+                        
+                        if (isHandOpen) {
+                            showMenu = true;
+                            drawMenu();
+                            statusDiv.textContent = "Menu activated! Use right hand to select options.";
+                        } else {
+                            showMenu = false;
+                        }
+                    } else {
+                        showMenu = false;
+                    }
+                } else {
+                    statusDiv.textContent = "No hands detected";
+                    isDrawing = false;
+                    showMenu = false;
+                }
+            } catch (error) {
+                console.error('Error in hand detection:', error);
+                statusDiv.textContent = `Detection error: ${error.message}`;
+            }
+            
+            // Continue detection loop
+            requestAnimationFrame(detectHands);
+        }
+
+        // Check if left hand is open (not a fist)
+        function isLeftHandOpen(landmarks) {
+            // Calculate average distance from fingertips to palm
+            const wrist = landmarks[0];
+            const fingerTips = [8, 12, 16, 20]; // Index, middle, ring, pinky tips
+            
+            let totalDistance = 0;
+            for (const tipIdx of fingerTips) {
+                const tip = landmarks[tipIdx];
+                totalDistance += calculateDistance(wrist, tip);
+            }
+            
+            const avgDistance = totalDistance / fingerTips.length;
+            
+            // If average distance is greater than a threshold, hand is considered open
+            return avgDistance > 120;
+        }
+
+        // Draw hand landmarks and connections
+        function drawHandLandmarks(landmarks, handType) {
+            // Define hand connections for visualization
+            const connections = [
+                // Thumb
+                [0, 1], [1, 2], [2, 3], [3, 4],
+                // Index finger
+                [0, 5], [5, 6], [6, 7], [7, 8],
+                // Middle finger
+                [0, 9], [9, 10], [10, 11], [11, 12],
+                // Ring finger
+                [0, 13], [13, 14], [14, 15], [15, 16],
+                // Pinky
+                [0, 17], [17, 18], [18, 19], [19, 20],
+                // Palm
+                [0, 5], [5, 9], [9, 13], [13, 17]
+            ];
+            
+            // Set different colors for left and right hands
+            debugCtx.strokeStyle = handType === 'right' ? 'white' : 'lightblue';
+            debugCtx.lineWidth = 2;
+            
+            // Draw connections
+            for (const [i, j] of connections) {
+                const from = landmarks[i];
+                const to = landmarks[j];
+                
+                if (from && to) {
+                    debugCtx.beginPath();
+                    debugCtx.moveTo(from.x, from.y);
+                    debugCtx.lineTo(to.x, to.y);
+                    debugCtx.stroke();
+                }
+            }
+            
+            // Draw keypoints
+            for (let i = 0; i < landmarks.length; i++) {
+                const keypoint = landmarks[i];
+                
+                // Highlight thumb tip and index tip with different colors
+                let pointColor = handType === 'right' ? 'blue' : 'cyan';
+                let pointSize = 4;
+                
+                if (i === 4) { // Thumb tip
+                    pointColor = handType === 'right' ? 'red' : 'pink';
+                    pointSize = 6;
+                } else if (i === 8) { // Index tip
+                    pointColor = handType === 'right' ? 'green' : 'lightgreen';
+                    pointSize = 6;
+                }
+                
+                debugCtx.beginPath();
+                debugCtx.arc(keypoint.x, keypoint.y, pointSize, 0, 2 * Math.PI);
+                debugCtx.fillStyle = pointColor;
+                debugCtx.fill();
+            }
+        }
+
+        // Draw menu interface
+        function drawMenu() {
+            // Draw semi-transparent overlay
+            menuCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            menuCtx.fillRect(0, 0, menuCanvas.width, menuCanvas.height);
+            
+            // Draw menu title
+            menuCtx.font = 'bold 24px Arial';
+            menuCtx.fillStyle = 'white';
+            menuCtx.textAlign = 'center';
+            menuCtx.fillText('Drawing Menu', menuCanvas.width / 2, 30);
+            
+            // Draw color section title
+            menuCtx.font = '16px Arial';
+            menuCtx.fillText('Colors', menuCanvas.width / 2, 360);
+            
+            // Draw size section title
+            menuCtx.fillText('Line Size', menuCanvas.width / 2, 180);
+            
+            // Draw menu items
+            menuItems.forEach(item => {
+                // Determine if item is being hovered
+                const isHovered = (item === menuHoverItem);
+                
+                // Draw item background
+                menuCtx.fillStyle = isHovered ? 'rgba(255, 255, 255, 0.3)' : 'rgba(255, 255, 255, 0.1)';
+                menuCtx.fillRect(item.x, item.y, item.width, item.height);
+                
+                // Draw border
+                menuCtx.strokeStyle = isHovered ? 'white' : 'rgba(255, 255, 255, 0.5)';
+                menuCtx.lineWidth = isHovered ? 2 : 1;
+                menuCtx.strokeRect(item.x, item.y, item.width, item.height);
+                
+                // Different rendering based on item type
+                if (item.type === 'color') {
+                    // Draw color swatch
+                    menuCtx.fillStyle = item.value;
+                    menuCtx.fillRect(item.x + 5, item.y + 5, item.width - 10, item.height - 20);
+                    
+                    // Draw color name
+                    menuCtx.fillStyle = 'white';
+                    menuCtx.font = '10px Arial';
+                    menuCtx.textAlign = 'center';
+                    menuCtx.fillText(item.name, item.x + item.width / 2, item.y + item.height - 5);
+                    
+                    // Highlight current color
+                    if (item.value === drawColor) {
+                        menuCtx.strokeStyle = 'yellow';
+                        menuCtx.lineWidth = 2;
+                        menuCtx.strokeRect(item.x + 3, item.y + 3, item.width - 6, item.height - 6);
+                    }
+                } else if (item.type === 'size') {
+                    // Draw size line example
+                    menuCtx.strokeStyle = 'white';
+                    menuCtx.lineWidth = item.value;
+                    menuCtx.beginPath();
+                    menuCtx.moveTo(item.x + 10, item.y + item.height / 2);
+                    menuCtx.lineTo(item.x + item.width - 10, item.y + item.height / 2);
+                    menuCtx.stroke();
+                    
+                    // Draw size name
+                    menuCtx.fillStyle = 'white';
+                    menuCtx.font = '10px Arial';
+                    menuCtx.textAlign = 'center';
+                    menuCtx.fillText(item.name, item.x + item.width / 2, item.y + item.height - 5);
+                    
+                    // Highlight current size
+                    if (item.value === lineWidth) {
+                        menuCtx.strokeStyle = 'yellow';
+                        menuCtx.lineWidth = 2;
+                        menuCtx.strokeRect(item.x + 3, item.y + 3, item.width - 6, item.height - 6);
+                    }
+                } else {
+                    // Draw action button text
+                    menuCtx.fillStyle = 'white';
+                    menuCtx.font = '14px Arial';
+                    menuCtx.textAlign = 'center';
+                    menuCtx.textBaseline = 'middle';
+                    menuCtx.fillText(item.name, item.x + item.width / 2, item.y + item.height / 2);
+                }
+            });
+            
+            // Draw current settings indicator
+            menuCtx.fillStyle = 'white';
+            menuCtx.font = '16px Arial';
+            menuCtx.textAlign = 'center';
+            menuCtx.fillText(`Current: ${getColorName(drawColor)}, ${getSizeName(lineWidth)}`, menuCanvas.width / 2, menuCanvas.height - 20);
+        }
+
+        // Check if cursor is hovering over a menu item
+        function checkMenuHover(x, y) {
+            for (const item of menuItems) {
+                if (x >= item.x && x <= item.x + item.width &&
+                    y >= item.y && y <= item.y + item.height) {
+                    return item;
+                }
+            }
+            return null;
+        }
+
+        // Draw a line on the canvas
+        function drawLine(x1, y1, x2, y2) {
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.strokeStyle = drawColor;
+            ctx.lineWidth = lineWidth;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+        }
+
+        // Calculate distance between two points
+        function calculateDistance(p1, p2) {
+            return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+        }
+
+        // Get color name from color value
+        function getColorName(colorValue) {
+            const color = colorOptions.find(c => c.color === colorValue);
+            return color ? color.name : 'Custom';
+        }
+
+        // Get size name from size value
+        function getSizeName(sizeValue) {
+            const size = sizeOptions.find(s => s.size === sizeValue);
+            return size ? size.name : 'Custom';
+        }
+
+        // Start the application
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>
