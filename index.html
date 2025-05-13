@@ -70,7 +70,7 @@
         model = await Moondream1ForConditionalGeneration.from_pretrained(modelId, {
           dtype: {
             embed_tokens: 'fp16',       // або 'fp32'
-            vision_encoder: 'fp16',     // або 'q8'
+            vision_encoder: 'q8',     // або 'q8'
             decoder_model_merged: 'q4',  // або 'q4f16' чи 'q8'
           },
           device: 'webgpu'  // Використовується WebGPU (якщо підтримується)
